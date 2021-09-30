@@ -12,6 +12,7 @@ import numpy as np
 from scipy.optimize import least_squares
 import warnings
 from dipy.reconst.base import ReconstModel
+from dipy.reconst.multi_voxel import MultiVoxelFit
 
 
 def multi_voxel_fitDKI(single_voxel_fit):
@@ -45,8 +46,26 @@ def multi_voxel_fitDKI(single_voxel_fit):
     return new_fit
 
 
+def _ivim_error(params, gtab, signal):
+    """Error function to be used in fitting the IVIM model.
+    Parameters
+    ----------
+    params : array
+        An array of IVIM parameters - [S0, f, D_star, D]
+    gtab : GradientTable class instance
+        Gradient directions and bvalues.
+    signal : array
+        Array containing the actual signal values.
+    Returns
+    -------
+    residual : array
+        An array containing the difference between actual and estimated signal.
+    """
+    residual = signal - ivim_prediction(params, gtab)
+    return residual
 
-def ivim_predictionDKI(params, gtab):
+
+def ivim_prediction(params, gtab):
     """The Intravoxel incoherent motion (IVIM) model function.
     Parameters
     ----------
@@ -70,24 +89,6 @@ def ivim_predictionDKI(params, gtab):
 
     return S
 
-
-def _ivim_errorDKI(params, gtab, signal):
-    """Error function to be used in fitting the IVIM model.
-    Parameters
-    ----------
-    params : array
-        An array of IVIM parameters - [S0, f, D_star, D]
-    gtab : GradientTable class instance
-        Gradient directions and bvalues.
-    signal : array
-        Array containing the actual signal values.
-    Returns
-    -------
-    residual : array
-        An array containing the difference between actual and estimated signal.
-    """
-    residual = signal - ivim_predictionDKI(params, gtab)
-    return residual
     
 class IvimModelDKI(ReconstModel):
     """Ivim model
@@ -241,11 +242,11 @@ class IvimModelDKI(ReconstModel):
                 warningMsg = "Bounds are violated for leastsq fitting. "
                 warningMsg += "Returning parameters from linear fit"
                 warnings.warn(warningMsg, UserWarning)
-                return IvimFit(self, params_linear)
+                return IvimFit(self, params_linear[0:3])
             else:
                 return IvimFit(self, params_two_stage)
         else:
-            return IvimFit(self, params_linear)
+            return IvimFit(self, params_linear[0:3])
 
     def estimate_linear_fit(self, data, split_b, less_than=True):
         """Estimate a linear fit by taking log of data.
