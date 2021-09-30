@@ -18,11 +18,11 @@ def multi_voxel_fitDKI(single_voxel_fit):
     """Method decorator to turn a single voxel model fit
     definition into a multi voxel model fit definition
     """
-    def new_fit(self, data, mask=None):
+    def new_fit(self, data, dki_map, mask=None):
         """Fit method for every voxel in data"""
         # If only one voxel just return a normal fit
         if data.ndim == 1:
-            return single_voxel_fit(self, data)
+            return single_voxel_fit(self, data, dki_map)
 
         # Make a mask if mask is None
         if mask is None:
@@ -38,7 +38,7 @@ def multi_voxel_fitDKI(single_voxel_fit):
         bar = tqdm(total=np.sum(mask), position=0)
         for ijk in ndindex(data.shape[:-1]):
             if mask[ijk]:
-                fit_array[ijk] = single_voxel_fit(self, data[ijk])
+                fit_array[ijk] = single_voxel_fit(self, data[ijk], dki_map[ijk])
                 bar.update()
         bar.close()
         return MultiVoxelFit(self, fit_array, mask)
@@ -64,9 +64,9 @@ def ivim_predictionDKI(params, gtab):
         An array containing the IVIM signal estimated using given parameters.
     """
     b = gtab.bvals
-    S0, f, D_star, D = params
+    S0, f, D_star, D, K = params
 
-    S = S0 * (f * np.exp(-b * D_star) + (1 - f) * np.exp(-b * D))
+    S = S0 * (f * np.exp(-b * D_star) + (1 - f) * np.exp(-b * D + (b*D**2)*K/6))
 
     return S
 
@@ -86,7 +86,7 @@ def _ivim_errorDKI(params, gtab, signal):
     residual : array
         An array containing the difference between actual and estimated signal.
     """
-    residual = signal - ivim_prediction(params, gtab)
+    residual = signal - ivim_predictionDKI(params, gtab)
     return residual
     
 class IvimModelDKI(ReconstModel):
@@ -192,8 +192,8 @@ class IvimModelDKI(ReconstModel):
 
         self.bounds = bounds or BOUNDS
 
-    @multi_voxel_fit
-    def fit(self, data):
+    @multi_voxel_fitDKI
+    def fit(self, data, dki_map):
         """ Fit method of the IvimModelTRR class.
         The fitting takes place in the following steps: Linear fitting for D
         (bvals > `split_b_D` (default: 400)) and store S0_prime. Another linear
@@ -231,7 +231,7 @@ class IvimModelDKI(ReconstModel):
         # Fit f and D_star using leastsq.
         params_f_D_star = [f_guess, D_star_prime]
         f, D_star = self.estimate_f_D_star(params_f_D_star, data, S0, D)
-        params_linear = np.array([S0, f, D_star, D])
+        params_linear = np.array([S0, f, D_star, D, dki_map])
         # Fit parameters again if two_stage flag is set.
         if self.two_stage:
             params_two_stage = self._leastsq(data, params_linear)
