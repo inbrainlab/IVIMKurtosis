@@ -1,8 +1,11 @@
+
+
 """Tools to easily make multi voxel models"""
 import numpy as np
 from numpy.lib.stride_tricks import as_strided
 from tqdm import tqdm
 
+from dipy.reconst.ivim import BOUNDS, f_D_star_error, IvimFit
 from dipy.core.ndindex import ndindex
 from dipy.reconst.quick_squash import quick_squash as _squash
 from dipy.reconst.base import ReconstFit
@@ -46,7 +49,7 @@ def multi_voxel_fitDKI(single_voxel_fit):
     return new_fit
 
 
-def _ivim_error(params, gtab, signal):
+def _ivim_error(params, gtab, signal, K):
     """Error function to be used in fitting the IVIM model.
     Parameters
     ----------
@@ -61,11 +64,12 @@ def _ivim_error(params, gtab, signal):
     residual : array
         An array containing the difference between actual and estimated signal.
     """
-    residual = signal - ivim_prediction(params, gtab)
+    residual = signal - ivim_prediction(params, K, gtab)
+    
     return residual
 
 
-def ivim_prediction(params, gtab):
+def ivim_prediction(params, K,  gtab):
     """The Intravoxel incoherent motion (IVIM) model function.
     Parameters
     ----------
@@ -83,21 +87,43 @@ def ivim_prediction(params, gtab):
         An array containing the IVIM signal estimated using given parameters.
     """
     b = gtab.bvals
-    S0, f, D_star, D, K = params
+    S0, f, D_star, D = params
 
     S = S0 * (f * np.exp(-b * D_star) + (1 - f) * np.exp(-b * D + (b*D**2)*K/6))
 
     return S
 
+def ivim_model_selector(gtab, fit_method='DKI', **kwargs):
+    """
+    Selector function to switch between the 2-stage Trust-Region Reflective
+    based NLLS fitting method (also containing the linear fit): `trr` and the
+    Variable Projections based fitting method: `varpro`.
+    Parameters
+    ----------
+    fit_method : string, optional
+        The value fit_method can either be 'trr' or 'varpro'.
+        default : trr
+    """
+    bounds_warning = 'Bounds for this fit have been set from experiments '
+    bounds_warning += 'and literature survey. To change the bounds, please '
+    bounds_warning += 'input your bounds in model definition...'
+
     
+    ivimmodel_dki = IvimModelDKI(gtab, **kwargs)
+    if 'bounds' not in kwargs:
+        warnings.warn(bounds_warning, UserWarning)
+    return ivimmodel_dki
+
+IvimModel = ivim_model_selector
+
 class IvimModelDKI(ReconstModel):
     """Ivim model
     """
-    def _init_(self, gtab, split_b_D=400.0, split_b_S0=200., bounds=None,
+    def __init__(self, gtab, split_b_D=400.0, split_b_S0=200., bounds=None,
                  two_stage=True, tol=1e-15,
                  x_scale=[1000., 0.1, 0.001, 0.0001],
                  gtol=1e-15, ftol=1e-15, eps=1e-15, maxiter=1000):
-
+    
         r"""
         Initialize an IVIM model.
         The IVIM model assumes that biological tissue includes a volume
@@ -181,7 +207,7 @@ class IvimModelDKI(ReconstModel):
             b0_s += "input with b0_threshold=0"
             raise ValueError(b0_s)
 
-        ReconstModel._init_(self, gtab)
+        ReconstModel.__init__(self, gtab)
         self.split_b_D = split_b_D
         self.split_b_S0 = split_b_S0
         self.bounds = bounds
@@ -232,21 +258,22 @@ class IvimModelDKI(ReconstModel):
         # Fit f and D_star using leastsq.
         params_f_D_star = [f_guess, D_star_prime]
         f, D_star = self.estimate_f_D_star(params_f_D_star, data, S0, D)
-        params_linear = np.array([S0, f, D_star, D, dki_map])
+        params_linear = np.array([S0, f, D_star, D])
         # Fit parameters again if two_stage flag is set.
         if self.two_stage:
-            params_two_stage = self._leastsq(data, params_linear)
+            params_two_stage = self._leastsq(data, dki_map, params_linear)
             bounds_violated = ~(np.all(params_two_stage >= self.bounds[0]) and
                                 (np.all(params_two_stage <= self.bounds[1])))
+            
             if bounds_violated:
                 warningMsg = "Bounds are violated for leastsq fitting. "
                 warningMsg += "Returning parameters from linear fit"
                 warnings.warn(warningMsg, UserWarning)
-                return IvimFit(self, params_linear[0:3])
+                return IvimFit(self, params_linear)
             else:
                 return IvimFit(self, params_two_stage)
         else:
-            return IvimFit(self, params_linear[0:3])
+            return IvimFit(self, params_linear)
 
     def estimate_linear_fit(self, data, split_b, less_than=True):
         """Estimate a linear fit by taking log of data.
@@ -345,7 +372,7 @@ class IvimModelDKI(ReconstModel):
         """
         return ivim_prediction(ivim_params, gtab)
 
-    def _leastsq(self, data, x0):
+    def _leastsq(self, data, dki_map, x0):
         """Use leastsq to find ivim_params
         Parameters
         ----------
@@ -378,7 +405,7 @@ class IvimModelDKI(ReconstModel):
                                 xtol=xtol,
                                 gtol=gtol,
                                 max_nfev=maxfev,
-                                args=(self.gtab, data),
+                                args=(self.gtab, data, dki_map),
                                 x_scale=self.x_scale)
             ivim_params = res.x
             if np.all(np.isnan(ivim_params)):
@@ -389,3 +416,4 @@ class IvimModelDKI(ReconstModel):
             warningMsg += " Returning x0 values from the linear fit."
             warnings.warn(warningMsg, UserWarning)
             return x0
+            
